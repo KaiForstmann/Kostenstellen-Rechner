@@ -215,6 +215,32 @@
   }
   .total-box span { display: block; font-size: 34px; margin-top: 6px; }
 
+  .sync-status {
+    text-align: center;
+    font-size: 15px;
+    color: #7A8794;
+    margin: -14px 0 20px 0;
+  }
+  .sync-status.ok { color: #1E7B45; }
+  .sync-status.err { color: var(--danger); }
+  .reset-sync-link {
+    display: block;
+    margin: -14px auto 20px auto;
+    background: none;
+    border: none;
+    color: #7A8794;
+    font-size: 14px;
+    text-decoration: underline;
+    cursor: pointer;
+    text-align: center;
+    width: 100%;
+  }
+  .sync-setup p {
+    font-size: 17px;
+    color: #444;
+    margin: 0 0 14px 0;
+  }
+
   @media (max-width: 600px) {
     body { font-size: 18px; }
     h1 { font-size: 30px; }
@@ -229,6 +255,20 @@
   <div class="page active" id="page-input">
     <h1>Kostenstellen-Rechner</h1>
     <p class="subtitle">Trage unten deine Versicherungen bzw. Kostenstellen ein.<br>Für jede: Name, monatlicher Beitrag und Startdatum.</p>
+    <p class="sync-status" id="sync-status">Lade gespeicherte Daten…</p>
+    <button type="button" id="reset-sync-btn" class="reset-sync-link" style="display:none;">Speicher-Schlüssel ändern</button>
+
+    <div class="card sync-setup" id="sync-setup" style="display:none;">
+      <div class="section-title">Einmalige Einrichtung: Online-Speicherung</div>
+      <p>Trage hier einmalig deinen GitHub-Zugriffsschlüssel ein, damit deine Eingaben online gespeichert werden und beim nächsten Öffnen wieder da sind. Der Schlüssel wird nur auf diesem Gerät gespeichert, nicht veröffentlicht.</p>
+      <div class="field">
+        <label>Zugriffsschlüssel</label>
+        <input type="password" id="token-input" placeholder="github_pat_...">
+      </div>
+      <div class="actions" style="margin-top:16px;">
+        <button class="btn btn-primary" id="token-save-btn" type="button">Speicherung aktivieren</button>
+      </div>
+    </div>
 
     <div class="error-box" id="error-box"></div>
 
@@ -288,11 +328,159 @@
     { name: "GEZ", beitrag: 18.36, start: DEFAULT_START }
   ];
 
+  // ============================================================
+  // ONLINE-SPEICHERUNG (GitHub-Repo als Datenablage)
+  // Der Zugriffsschlüssel steht NIE im Code/Repo, sondern nur lokal
+  // im Browser dieses Geräts (localStorage).
+  // ============================================================
+  var GH_OWNER = "KaiForstmann";
+  var GH_REPO = "Kostenstellen-Rechner";
+  var GH_PATH = "data.json";
+  var TOKEN_STORAGE_KEY = "kr_gh_token";
+  var POLL_INTERVAL_MS = 15000;
+
+  function getToken() { return localStorage.getItem(TOKEN_STORAGE_KEY) || ""; }
+  function setToken(t) { localStorage.setItem(TOKEN_STORAGE_KEY, t.trim()); }
+  function clearToken() { localStorage.removeItem(TOKEN_STORAGE_KEY); }
+  function syncEnabled() { return !!getToken(); }
+
+  var currentSha = null;
+  var lastRemoteJSON = null;
+  var isEditingNow = false;
+  var saveDebounceTimer = null;
+  var pollTimer = null;
+  var onResultPageFlag = false;
+
+  function utf8_to_b64(str) { return btoa(unescape(encodeURIComponent(str))); }
+  function b64_to_utf8(str) { return decodeURIComponent(escape(atob(str.replace(/\n/g, "")))); }
+
+  function setSyncStatus(text, kind) {
+    var el = document.getElementById("sync-status");
+    el.textContent = text;
+    el.className = "sync-status" + (kind ? " " + kind : "");
+  }
+
+  function githubUrl() {
+    return "https://api.github.com/repos/" + GH_OWNER + "/" + GH_REPO + "/contents/" + GH_PATH;
+  }
+
+  async function githubLoad() {
+    if (!syncEnabled()) return null;
+    try {
+      var res = await fetch(githubUrl(), {
+        headers: { "Authorization": "Bearer " + getToken(), "Accept": "application/vnd.github+json" },
+        cache: "no-store"
+      });
+      if (res.status === 401 || res.status === 403) {
+        setSyncStatus("Zugriffsschlüssel ungültig oder abgelaufen.", "err");
+        return null;
+      }
+      if (res.status === 404) { currentSha = null; return null; }
+      if (!res.ok) { setSyncStatus("Speicher-Fehler (" + res.status + ").", "err"); return null; }
+      var body = await res.json();
+      currentSha = body.sha;
+      var jsonStr = b64_to_utf8(body.content);
+      lastRemoteJSON = jsonStr;
+      return JSON.parse(jsonStr);
+    } catch (e) {
+      setSyncStatus("Kein Internet – nur lokal auf diesem Gerät.", "err");
+      return null;
+    }
+  }
+
+  async function githubSave(dataObj) {
+    if (!syncEnabled()) return false;
+    var jsonStr = JSON.stringify(dataObj, null, 2);
+    if (jsonStr === lastRemoteJSON) return true;
+    try {
+      var payload = { message: "Kostenstellen aktualisiert", content: utf8_to_b64(jsonStr) };
+      if (currentSha) payload.sha = currentSha;
+
+      var res = await fetch(githubUrl(), {
+        method: "PUT",
+        headers: {
+          "Authorization": "Bearer " + getToken(),
+          "Accept": "application/vnd.github+json",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (res.status === 409 || res.status === 422) {
+        await githubLoad();
+        payload.sha = currentSha;
+        res = await fetch(githubUrl(), {
+          method: "PUT",
+          headers: {
+            "Authorization": "Bearer " + getToken(),
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(payload)
+        });
+      }
+
+      if (!res.ok) { setSyncStatus("Speichern fehlgeschlagen (" + res.status + ").", "err"); return false; }
+      var body2 = await res.json();
+      currentSha = body2.content.sha;
+      lastRemoteJSON = jsonStr;
+      setSyncStatus("Gespeichert – " + new Date().toLocaleTimeString("de-DE"), "ok");
+      return true;
+    } catch (e) {
+      setSyncStatus("Kein Internet – Änderung nur lokal.", "err");
+      return false;
+    }
+  }
+
+  function scheduleSave() {
+    if (!syncEnabled()) return;
+    if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = setTimeout(function () {
+      githubSave({ rows: getCurrentRows(), updatedAt: new Date().toISOString() });
+    }, 900);
+  }
+
+  async function pollForUpdates() {
+    if (!syncEnabled() || isEditingNow || onResultPageFlag) return;
+    try {
+      var res = await fetch(githubUrl(), {
+        headers: { "Authorization": "Bearer " + getToken(), "Accept": "application/vnd.github+json" },
+        cache: "no-store"
+      });
+      if (!res.ok) return;
+      var body = await res.json();
+      if (body.sha === currentSha) return;
+      currentSha = body.sha;
+      var jsonStr = b64_to_utf8(body.content);
+      if (jsonStr === lastRemoteJSON) return;
+      lastRemoteJSON = jsonStr;
+      var data = JSON.parse(jsonStr);
+      renderRows(data.rows);
+      setSyncStatus("Aktualisiert – " + new Date().toLocaleTimeString("de-DE"), "ok");
+    } catch (e) { /* naechster Versuch folgt automatisch */ }
+  }
+
+  function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(function () {
+      if (document.visibilityState === "visible") pollForUpdates();
+    }, POLL_INTERVAL_MS);
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") pollForUpdates();
+  });
+
+  // ============================================================
+  // EINGABE-SEITE
+  // ============================================================
   var rowsContainer = document.getElementById("rows-container");
   var errorBox = document.getElementById("error-box");
   var rowIdCounter = 0;
 
-  function addRow(data) {
+  function clearRows() { rowsContainer.innerHTML = ""; }
+
+  function addRow(data, skipSave) {
     data = data || { name: "", beitrag: "", start: DEFAULT_START };
     rowIdCounter++;
     var id = "row-" + rowIdCounter;
@@ -320,15 +508,44 @@
     row.querySelector(".remove-btn").addEventListener("click", function () {
       if (rowsContainer.querySelectorAll(".row").length > 1) {
         row.remove();
+        scheduleSave();
       }
     });
+
+    row.querySelectorAll("input").forEach(function (inp) {
+      inp.addEventListener("focus", function () { isEditingNow = true; });
+      inp.addEventListener("blur", function () { isEditingNow = false; scheduleSave(); });
+      inp.addEventListener("change", function () { scheduleSave(); });
+    });
+
+    if (!skipSave) scheduleSave();
+  }
+
+  function getCurrentRows() {
+    var rows = rowsContainer.querySelectorAll(".row");
+    var out = [];
+    rows.forEach(function (r) {
+      out.push({
+        name: r.querySelector(".f-name").value,
+        beitrag: r.querySelector(".f-beitrag").value,
+        start: r.querySelector(".f-start").value
+      });
+    });
+    return out;
+  }
+
+  function renderRows(rowsData) {
+    clearRows();
+    if (!rowsData || rowsData.length === 0) {
+      DEFAULT_ROWS.forEach(function (r) { addRow(r, true); });
+    } else {
+      rowsData.forEach(function (r) { addRow(r, true); });
+    }
   }
 
   function escapeHtml(str) {
     return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
-
-  DEFAULT_ROWS.forEach(addRow);
 
   document.getElementById("add-row-btn").addEventListener("click", function () {
     addRow();
@@ -390,12 +607,14 @@
     renderResults(data);
     document.getElementById("page-input").classList.remove("active");
     document.getElementById("page-result").classList.add("active");
+    onResultPageFlag = true;
     window.scrollTo(0, 0);
   });
 
   document.getElementById("back-btn").addEventListener("click", function () {
     document.getElementById("page-result").classList.remove("active");
     document.getElementById("page-input").classList.add("active");
+    onResultPageFlag = false;
     window.scrollTo(0, 0);
   });
 
@@ -456,6 +675,54 @@
       barsContainer.appendChild(barRow);
     });
   }
+
+  // ============================================================
+  // EINRICHTUNG & START
+  // ============================================================
+  var syncSetupBox = document.getElementById("sync-setup");
+  var resetSyncBtn = document.getElementById("reset-sync-btn");
+
+  async function loadAndStart() {
+    var remote = await githubLoad();
+    if (remote && remote.rows) {
+      renderRows(remote.rows);
+      setSyncStatus("Geladen – Stand " + (remote.updatedAt ? new Date(remote.updatedAt).toLocaleString("de-DE") : ""), "ok");
+    } else {
+      renderRows(null);
+      setSyncStatus("Noch keine gespeicherten Daten – Beispiele geladen.", "");
+    }
+    startPolling();
+  }
+
+  document.getElementById("token-save-btn").addEventListener("click", function () {
+    var val = document.getElementById("token-input").value.trim();
+    if (!val) return;
+    setToken(val);
+    syncSetupBox.style.display = "none";
+    resetSyncBtn.style.display = "block";
+    setSyncStatus("Verbinde…", "");
+    loadAndStart();
+  });
+
+  resetSyncBtn.addEventListener("click", function () {
+    clearToken();
+    if (pollTimer) clearInterval(pollTimer);
+    syncSetupBox.style.display = "block";
+    resetSyncBtn.style.display = "none";
+    setSyncStatus("Speicher-Schlüssel entfernt – nur lokal.", "");
+  });
+
+  (function init() {
+    if (!syncEnabled()) {
+      syncSetupBox.style.display = "block";
+      resetSyncBtn.style.display = "none";
+      setSyncStatus("Online-Speicherung noch nicht eingerichtet.", "");
+      renderRows(null);
+    } else {
+      resetSyncBtn.style.display = "block";
+      loadAndStart();
+    }
+  })();
 </script>
 </body>
 </html>
