@@ -1,0 +1,35 @@
+{
+  "rows": [
+    {
+      "name": "vvvv",
+      "beitrag": "",
+      "start": "2017-02-01"
+    },
+    {
+      "name": "",
+      "beitrag": "",
+      "start": "2017-02-01"
+    },
+    {
+      "name": "KFZ-Versicherung",
+      "beitrag": "45",
+      "start": "2017-02-01"
+    },
+    {
+      "name": "Hausratversicherung",
+      "beitrag": "15",
+      "start": "2017-02-01"
+    },
+    {
+      "name": "Rechtsschutzversicherung",
+      "beitrag": "20",
+      "start": "2017-02-01"
+    },
+    {
+      "name": "GEZ",
+      "beitrag": "18.36",
+      "start": "2017-02-01"
+    }
+  ],
+  "updatedAt": "2026-07-19T14:10:06.111Z"
+}
