@@ -17,7 +17,7 @@
     },
     {
       "name": "Hausratversicherung",
-      "beitrag": "15",
+      "beitrag": "13.78",
       "start": "2017-02-01"
     },
     {
@@ -31,5 +31,5 @@
       "start": "2017-02-01"
     }
   ],
-  "updatedAt": "2026-07-19T14:27:58.494Z"
+  "updatedAt": "2026-07-19T14:28:08.137Z"
 }
